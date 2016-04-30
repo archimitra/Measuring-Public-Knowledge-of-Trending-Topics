@@ -1,0 +1,21 @@
+Hello,
+
+Although the report and the R script is self explanatory, I am putting done some suggestions to make it easier for you to understand and use.
+The R script has seven parts. 
+a. Loading libraries
+b. Creating the tables
+c.  Setting up Twitter - It has all the code necessary to authorize the app and perform a OAuth handshake. However, I have removed my tokens and commented the part which is necessary to perform the handshake. I will suggest this part to be run before the rest.
+
+d. Phase 1: Trending topics from Twitter
+
+e. Phase 2 : Article Search from Wikipedia - Is a function.
+
+f. Phase 3 : Article Page Count - Is a function.
+
+g. Data population and Retrieval Functions and Queries - A 1st part is dependent on running the Phase 1 and changing the duration. You will find a comment specifying the change needed. The 2nd part is dependent on choosing a topic from 1st part and running Phase 2. The 3rd part is dependent on choosing an article from 2nd part, choosing a duration and running Phase 3.
+
+I am also providing the .RData file and WikiTwitter.sqlite which has the last run database and part (g). This might be helpful if changing the variables in part (g)  turns out to be confusing.
+
+Please don't hesitate to reach out to me if you would like some more clarity. Thank you for your patience.
+
+-Archi

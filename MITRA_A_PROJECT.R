@@ -1,0 +1,307 @@
+################################################################################
+# Archishman Mitra
+# DSCS 6020 Spring 2016
+# Term Project
+################################################################################
+
+#rm(list=ls())
+
+#Writing Directory
+setwd("C:/Users/mitra/Documents/Data Science/R Scripts/CSRD/Project")
+
+#~~~~Loading the required libraries~~~~#
+library(RCurl)
+library(ROAuth)
+library(streamR)
+library(twitteR)
+library(base64enc)
+
+#Loading the library for SQLite
+library(RSQLite)
+
+#Loading the libraries for Wikipedia
+library(WikipediR)
+
+#Loading other libraries
+library(RCurl)
+library(XML)
+
+#~~~~Setup for SQLite~~~~#
+db <- dbConnect(SQLite(), dbname="WikiTwitter.sqlite")
+
+#~~~~Creating tables~~~~#
+dbSendQuery (db, "CREATE TABLE IF NOT EXISTS Trending_Topic (
+                  Trend_ID INTEGER PRIMARY KEY,
+                  Topic TEXT,
+                  URL TEXT,
+                  Twit_Query TEXT,
+                  WOEID INTEGER NOT NULL,
+                  timestamp DATETIME,
+                  Search_Item TEXT);")
+
+dbSendQuery (db, "CREATE TABLE IF NOT EXISTS Wiki_Article (
+                  Article_ID INTEGER PRIMARY KEY,
+                  Article_URL VARCHAR(100),
+                  Article_Name TEXT);")
+dbGetQuery(db, "INSERT INTO Wiki_Article values(1,'NOT FOUND','NOT FOUND')")
+
+dbSendQuery (db, "CREATE TABLE IF NOT EXISTS Trend_Article (
+                  Trend_Article_ID INTEGER PRIMARY KEY,
+                  Trend_ID INTEGER,
+                  Article_ID INTEGER,
+                  FOREIGN KEY(Trend_ID) REFERENCES Wiki_Article(Article_ID)
+                  FOREIGN KEY(Trend_ID) REFERENCES Trending_Topic(Trend_ID));")
+
+  dbSendQuery (db, "CREATE TABLE IF NOT EXISTS Article_Views (
+                  View_ID INTEGER PRIMARY KEY,
+                  Granularity VARCHAR(10),
+                  Datestamp Date,
+                  Access VARCHAR(10),
+                  Agent VARCHAR(10),
+                  Views INTEGER,
+                  Trend_Article_ID INTEGER,
+                  FOREIGN KEY(Trend_Article_ID) REFERENCES Trend_Article(Trend_Article_ID));")
+
+#Listing all tables
+dbListTables(db)
+
+
+#~~~~Setup for Twitter~~~~#
+
+#Setting up the details for authorization
+requestURL       <- "https://api.twitter.com/oauth/request_token"
+accessURL        <- "https://ainpi.twitter.com/oauth/access_token"
+authURL          <- "https://api.twitter.com/oauth/authorize"
+consumerKey      <- ""         #Insert value                                                                          
+consumerSecret   <- ""         #Insert value                                                                          
+accessToken      <- ""         #Insert value
+accessTokenSecret<- ""         #Insert value
+
+# #Downloading the OAuth certificate
+# download.file(url="http://curl.haxx.se/ca/cacert.pem", destfile="cacert.pem")
+
+# #Authorizing app in R
+# my_oauth <- OAuthFactory$new( consumerKey=consumerKey,
+#                               consumerSecret=consumerSecret,
+#                               requestURL=requestURL,
+#                               accessURL=accessURL, 
+#                               authURL=authURL)
+# 
+# #Continue if a certificate is already setup
+# my_oauth$handshake(cainfo="cacert.pem")
+
+#Setting up OAuth in Twitter
+setup_twitter_oauth(consumerKey, consumerSecret, accessToken, accessTokenSecret)
+
+#~~~~PHASE 1 : Trending topics from Twitter~~~~#
+
+#Getting the trending topics from Twitter for location US
+trendingTopic <- getTrends(woeid =	23424977)
+
+#Adding a timestamp to the trendingTopic dataframe
+trendingTopic <- cbind(trendingTopic,rep(strftime(Sys.time(),"%Y%m%d %H:%M:%S"),nrow(trendingTopic)))
+
+#Function to parse the hashtag and convert it into a searchable topic
+hashtagConvert <- function(hashtag){
+  m <- gregexpr("([A-Z]+?)([a-z]*[0-9]*)",hashtag,perl=TRUE)
+  words <- regmatches(hashtag,m)[[1]]
+  topic <- paste(words,collapse = '+')
+  return(topic)
+}
+
+#Applying the above function to add another column
+Searchable <- data.frame(lapply(trendingTopic$name, hashtagConvert))
+trendingTopic <- cbind(trendingTopic,t(Searchable))
+
+
+#Finding the last key
+key <- dbGetQuery(db, "Select MAX(Trend_ID) from Trending_Topic;")
+
+#Creating a index
+if(is.na(key[1])){
+  ID <- seq(1,nrow(trendingTopic))
+} else {
+  key <- as.numeric(key)
+  ID <- seq(key+1,key+nrow(trendingTopic))
+}
+
+#Adding the ID
+trendingTopic <- cbind(ID,trendingTopic)
+
+#Dumping the data in the table Trending_Topic
+dbWriteTable(db, name = "Trending_Topic", value = trendingTopic, row.names=FALSE, append=TRUE)
+
+#~~~~PHASE 2 : Article Search from Wikipedia~~~~#
+
+ArticleSearch <- function(trend_id,topic){
+  #trend_id = 2
+  #topic = "Niall+Day"
+  
+  #Searching for wikipedia for relevant articles of the topic
+  Search = paste("https://en.wikipedia.org/w/api.php?",
+                 "action=opensearch",
+                 "&search=",topic, #The search keywords
+                 "&limit=3",       #No. of search results
+                 "&namespace=0",   #No. of page of search results
+                 "&format=xml",    #Format of return, Eg : XML, JSON, HTML, PHP
+                 sep='')
+  wikisearchXML <- getURL(url = Search)
+  
+  #Parsing XML to get to the articles link
+  temp <- xmlTreeParse(wikisearchXML)
+  size <- xmlSize(temp[[1]][[1]][[2]])
+  
+  article <- data.frame()
+  
+  if (size > 0){
+    AID <- data.frame()
+    for (i in 1:size){
+      value <- xmlValue(temp[[1]][[1]][[2]][[i]][[2]])
+      article[i,1] <- value
+      splitvalue <- strsplit(value,'wiki\\/')
+      article[i,2] <-  splitvalue[[1]][2]
+      #Checking if the article exists and getting its id from Wiki_Article
+      SQL <- paste("SELECT Article_ID FROM Wiki_Article WHERE Article_Name = '",article[i,2],"'",sep='')
+      AID <- rbind(AID, as.numeric(dbGetQuery(db, SQL)))
+    }
+    
+    #Subsetting the article dataframe depending on if the article exists
+    articleTable <- article[which(is.na(AID)),]
+    
+    if(nrow(articleTable) > 0){
+      
+      #Finding the last key
+      key <- dbGetQuery(db, "Select MAX(Article_ID) from Wiki_Article;")
+      
+      #Creating an index
+      key <- as.numeric(key)
+      ID <- seq(key+1,key+nrow(articleTable))
+      
+      #Building the Article to be put in Trend_Article
+      AID <- na.omit(AID)
+      AID <- rbind(AID,data.frame(ID))
+      
+      #Adding the ID
+      articleTable <- cbind(ID,articleTable)
+      
+      #Dumping the data in the table Wiki_Article
+      dbWriteTable(db, name = "Wiki_Article", value = articleTable, row.names=FALSE, append=TRUE)
+    }
+  } else {
+    #Using the default 'NOT FOUND' ID
+    AID <- data.frame(1)
+  }
+  
+  #Setting up dataframe to be added to Trend_Article table
+  trendArticle <- cbind(data.frame(rep(trend_id,nrow(AID))),AID)
+  
+  #Finding the last key
+  key <- dbGetQuery(db, "Select MAX(Trend_Article_ID) from Trend_Article;")
+  key <- as.numeric(key)
+  
+  #Creating an index
+  if(is.na(key[1])){
+    ID <- seq(1,nrow(trendArticle))
+  } else {
+    ID <- seq(key+1,key+nrow(trendArticle))
+  }
+  
+  #Adding the ID
+  trendArticle <- cbind(ID,trendArticle)
+  
+  #Dumping the data in the table Trend_Article
+  dbWriteTable(db, name = "Trend_Article", value = trendArticle, row.names=FALSE, append=TRUE)
+  
+  paste("Data added to tables Wiki_Article and Trend_Article")
+}
+
+#~~~~PHASE 3 : Article Page Counts~~~~#
+
+#Creating a function to get page counts 
+PageCountfun <- function(Trend_Article_ID, articleName, fromDate, toDate){
+  
+  #Trend_Article_ID = 18
+  #articleName = "Kate_Smith"
+ 
+  #Using the article name to get the view count statistics
+  pageCountURL <- paste("https://wikimedia.org/api/rest_v1/metrics/pageviews/",
+                        "per-article/",  
+                        "en.wikipedia/",  #Type of Wikipedia project
+                        "desktop/",       #Access Method - all-access, desktop, mobile-app, mobile-web
+                        "user/",          #Type of agent - user, all-access, spider or bot
+                         articleName,"/", #Article Name
+                        "daily/",         #Granularity of page counts
+                         fromDate,"/",    #Begin Date in YYYYMMDD
+                         toDate,          #End Date in YYYYMMDD
+                         sep='')
+  
+  #Gettinng the JSON object
+  pageCountJSON <- getURL(url = pageCountURL, 
+                          httpheader = c('User-Agent' = "Grad student from Boston"))
+  
+  #Converting it into a dataframe
+  pageCount <- data.frame(fromJSON(pageCountJSON))
+  pageCount <- pageCount[,-c(1,2)]
+  
+  #Adding the Trend_Article_ID
+  pageCount <- cbind(pageCount, rep(Trend_Article_ID,nrow(pageCount)))
+
+  #Finding the last key
+  key <- dbGetQuery(db, "Select MAX(View_ID) from Article_Views;")
+  key <- as.numeric(key)
+  
+  #Creating an index
+  if(is.na(key[1])){
+    ID <- seq(1,nrow(pageCount))
+  } else {
+    ID <- seq(key+1,key+nrow(pageCount))
+  }
+
+  #Adding the ID
+  pageCount <- cbind(ID,pageCount)
+  
+  #Dumping the data in the table Trend_Article
+  dbWriteTable(db, name = "Article_Views", value = pageCount, row.names=FALSE, append=TRUE)
+  
+  paste("Data added to table Article_Views")
+}
+
+
+#~~~~Data population and Retrieval Functions and Queries~~~~#
+
+#Getting the trending topic for a particular duration from Trending_Topic
+fromDate = "'20160425 00:00:00'" #Change to current day
+todate = "'20160425 24:59:59'" #Change to current day
+SQL <- paste("SELECT * FROM Trending_Topic WHERE Timestamp >",fromDate,"AND Timestamp <",todate)
+trendTopic <- dbGetQuery(db, SQL)
+
+tail(trendTopic)
+
+#Finding the relevant article using ArticleSearch function for a particular Trending topic
+ArticleSearch(trendTopic$Trend_ID[2],trendTopic$Search_Item[2])
+
+#Getting the Article_Name and Trend_Article_ID for a particular Trending topic
+Trend_ID <- trendTopic$Trend_ID[2]
+SQL <- paste("SELECT ta.Trend_Article_ID,wa.Article_Name  FROM Wiki_Article wa", 
+                                 "JOIN Trend_Article ta ON ta.Article_ID = wa.Article_ID",
+                                "WHERE Trend_ID=",Trend_ID)
+ArticleName <- dbGetQuery(db, SQL)
+tail(ArticleName)
+
+#Finding the pageview counts using PageCountfun for a particular duration for a prticular Aricle
+fromDate = '20160415'
+toDate = '20160423'
+PageCountfun(ArticleName$Trend_Article_ID[1],ArticleName$Article_Name[1],fromDate,toDate)
+
+#Retrieving a dataframe which can be used for analysis
+WikiTwitter <- dbGetQuery(db, "SELECT tt.Topic, tt.Timestamp,wa.Article_Name, 
+                                      av.Datestamp,av.Access,av.Agent,av.Views
+                                 FROM Wiki_Article wa 
+                                 JOIN Trending_Topic tt ON tt.Trend_ID = ta.Trend_ID
+                                 JOIN Trend_Article ta ON ta.Article_ID = wa.Article_ID
+                                 JOIN Article_Views av on av.Trend_Article_ID=ta.Trend_Article_ID
+                                WHERE av.Trend_Article_ID=ta.Trend_Article_ID")
+head(WikiTwitter)
+
+dbDisconnect(db)
+rm(list=ls())
